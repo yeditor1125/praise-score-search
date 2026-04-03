@@ -31,6 +31,11 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
     return res.status(400).json({ message: "query is required" });
   }
 
-  const result = await runSearch(query, body.sources);
-  return res.status(200).json(result);
+  try {
+    const result = await runSearch(query, body.sources);
+    return res.status(200).json(result);
+  } catch (error) {
+    console.error("search-api-error", error);
+    return res.status(200).json([]);
+  }
 }
