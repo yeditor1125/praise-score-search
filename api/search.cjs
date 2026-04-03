@@ -1,6 +1,13 @@
 const USER_AGENT =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0 Safari/537.36";
 
+const TEXT_TIMEOUT_MS = 3500;
+const JSON_TIMEOUT_MS = 4500;
+const SOURCE_TIMEOUT_MS = 4000;
+const CACHE_TTL_MS = 60 * 1000;
+
+const responseCache = new Map();
+
 const defaultSources = [
   {
     id: "music-in",
@@ -15,11 +22,32 @@ const defaultSources = [
     url: "https://god-is-with-me.tistory.com/category/찬양악보",
     type: "tistory",
     enabled: true
+  },
+  {
+    id: "godinthebible",
+    name: "godinthebible naver",
+    url: "https://blog.naver.com/godinthebible",
+    type: "naver",
+    enabled: true
+  },
+  {
+    id: "relishsky",
+    name: "relishsky naver",
+    url: "https://m.blog.naver.com/PostList.naver?blogId=relishsky&categoryName=CCM&categoryNo=50",
+    type: "naver",
+    enabled: true
   }
 ];
 
+function withTimeout(promise, timeoutMs) {
+  return Promise.race([
+    promise,
+    new Promise((resolve) => setTimeout(() => resolve([]), timeoutMs))
+  ]);
+}
+
 function decodeHtml(text) {
-  return text
+  return (text || "")
     .replace(/&amp;/g, "&")
     .replace(/&lt;/g, "<")
     .replace(/&gt;/g, ">")
@@ -82,7 +110,7 @@ function extractKeyFromTitle(title) {
 
 async function fetchText(url) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 8000);
+  const timeout = setTimeout(() => controller.abort(), TEXT_TIMEOUT_MS);
   try {
     const response = await fetch(url, {
       signal: controller.signal,
@@ -99,7 +127,7 @@ async function fetchText(url) {
 
 async function fetchJson(url, headers = {}) {
   const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), 10000);
+  const timeout = setTimeout(() => controller.abort(), JSON_TIMEOUT_MS);
   try {
     const response = await fetch(url, {
       signal: controller.signal,
@@ -131,8 +159,8 @@ function parseTistoryRss(xml, source, query) {
   const blocks = (xml || "").match(/<item>[\s\S]*?<\/item>/g) || [];
   for (const block of blocks) {
     const title = stripTag(((block.match(/<title>([\s\S]*?)<\/title>/i) || [])[1] || "").trim());
-    const link = (((block.match(/<link>([\s\S]*?)<\/link>/i) || [])[1] || "").trim());
-    const pubDate = (((block.match(/<pubDate>([\s\S]*?)<\/pubDate>/i) || [])[1] || "").trim());
+    const link = ((block.match(/<link>([\s\S]*?)<\/link>/i) || [])[1] || "").trim();
+    const pubDate = ((block.match(/<pubDate>([\s\S]*?)<\/pubDate>/i) || [])[1] || "").trim();
     const score = relevanceScore(title, query);
     if (!title || !link || score <= 0) continue;
     items.push({
@@ -153,7 +181,7 @@ function parseTistoryHtml(html, source, query) {
   const matches = (html || "").match(/<a[^>]+href="([^"]+)"[^>]*>([\s\S]*?)<\/a>/gi) || [];
   const root = getRootUrl(source.url);
   for (const block of matches) {
-    const href = (((block.match(/href="([^"]+)"/i) || [])[1] || "").trim());
+    const href = ((block.match(/href="([^"]+)"/i) || [])[1] || "").trim();
     const title = stripTag(((block.match(/>([\s\S]*?)<\/a>/i) || [])[1] || ""));
     if (!href || !title || title.length < 2) continue;
     const score = relevanceScore(title, query);
@@ -178,6 +206,8 @@ async function collectFromTistory(source, query) {
     const parsed = parseTistoryRss(rss, source, query);
     if (parsed.length > 0) return parsed;
   }
+
+  // RSS가 비었을 때만 짧은 HTML fallback
   const html = await fetchText(source.url);
   return html ? parseTistoryHtml(html, source, query) : [];
 }
@@ -190,7 +220,7 @@ async function searchNaverApi(query) {
   const endpoint =
     "https://openapi.naver.com/v1/search/blog.json" +
     `?query=${encodeURIComponent(`${query} 악보`)}` +
-    "&display=30&sort=sim";
+    "&display=20&sort=sim";
 
   const response = await fetchJson(endpoint, {
     "X-Naver-Client-Id": clientId,
@@ -230,12 +260,13 @@ async function runSearch(query, sources) {
   const target = (Array.isArray(sources) && sources.length ? sources : defaultSources).filter((s) => s.enabled);
   const tistorySources = target.filter((s) => s.type === "tistory");
 
-  const [tistoryResults, naverApiResults] = await Promise.all([
-    Promise.allSettled(tistorySources.map((source) => collectFromTistory(source, query))).then((settled) =>
-      settled.flatMap((r) => (r.status === "fulfilled" ? r.value : []))
-    ),
-    searchNaverApi(query)
-  ]);
+  const tistoryPromise = Promise.allSettled(
+    tistorySources.map((source) => withTimeout(collectFromTistory(source, query), SOURCE_TIMEOUT_MS))
+  ).then((settled) => settled.flatMap((r) => (r.status === "fulfilled" ? r.value : [])));
+
+  const naverPromise = withTimeout(searchNaverApi(query), SOURCE_TIMEOUT_MS);
+
+  const [tistoryResults, naverApiResults] = await Promise.all([tistoryPromise, naverPromise]);
 
   return dedupe([...(tistoryResults || []), ...(naverApiResults || [])])
     .sort((a, b) => {
@@ -243,7 +274,7 @@ async function runSearch(query, sources) {
       if (a.publishedAt && b.publishedAt) return new Date(b.publishedAt).getTime() - new Date(a.publishedAt).getTime();
       return 0;
     })
-    .slice(0, 150);
+    .slice(0, 120);
 }
 
 module.exports = async function handler(req, res) {
@@ -259,7 +290,15 @@ module.exports = async function handler(req, res) {
     const query = `${body.query || ""}`.trim();
     if (!query) return res.status(400).json({ message: "query is required" });
 
+    const cacheKey = JSON.stringify({ query, sources: body.sources || null });
+    const cached = responseCache.get(cacheKey);
+    const now = Date.now();
+    if (cached && cached.expiresAt > now) {
+      return res.status(200).json(cached.data);
+    }
+
     const result = await runSearch(query, body.sources);
+    responseCache.set(cacheKey, { data: result, expiresAt: now + CACHE_TTL_MS });
     return res.status(200).json(result);
   } catch (error) {
     console.error("search-api-error", error);
