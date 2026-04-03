@@ -1,0 +1,7 @@
+{
+  "functions": {
+    "api/search.ts": {
+      "runtime": "@vercel/node@3.2.26"
+    }
+  }
+}
