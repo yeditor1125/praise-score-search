@@ -16,6 +16,5 @@
     "noUnusedParameters": true,
     "baseUrl": "."
   },
-  "include": ["src", "api", "lib", "vite.config.ts"],
-  "references": [{ "path": "./tsconfig.node.json" }]
+  "include": ["src", "api", "lib", "vite.config.ts"]
 }

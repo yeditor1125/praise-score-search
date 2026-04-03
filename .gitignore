@@ -5,3 +5,5 @@ vite.config.js
 vite.config.d.ts
 .vercel
 .env
+lib/**/*.js
+lib/**/*.d.ts
